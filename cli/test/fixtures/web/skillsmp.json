@@ -1,0 +1,75 @@
+{
+ "skills": [
+  {
+   "id": "openclaw-openclaw-agents-skills-agent-transcript-skill-md",
+   "name": "agent-transcript",
+   "author": "openclaw",
+   "authorAvatar": "https://avatars.githubusercontent.com/u/252820863?v=4",
+   "description": "Add a redacted agent transcript section to GitHub PR or issue bodies during OpenClaw agent-created PR/issue workflows.",
+   "contentLanguage": "en",
+   "githubUrl": "https://github.com/openclaw/openclaw/tree/main/.agents/skills/agent-transcript",
+   "stars": 388044,
+   "forks": 81471,
+   "updatedAt": 1779808673,
+   "path": "SKILL.md",
+   "branch": "main",
+   "route": {
+    "ownerSlug": "openclaw",
+    "repoSlug": "openclaw",
+    "routeSlug": "agents-skills-agent-transcript",
+    "sourceSkillPath": ".agents/skills/agent-transcript/SKILL.md"
+   }
+  },
+  {
+   "id": "openclaw-openclaw-agents-skills-auto-qa-skill-md",
+   "name": "auto-qa",
+   "author": "openclaw",
+   "authorAvatar": "https://avatars.githubusercontent.com/u/252820863?v=4",
+   "description": "Continuously audit, live-test, and stress-test the current OpenClaw codebase across at least ten independently scoped subsystem lanes; default to 100 independently verified, landed root-cause fixes, maintain an evidence-backed report, and announce each merged pull request immediately. Use for OpenClaw-wide autonomous QA, live-provider campaigns, gateway, CLI, web, plugin, native-app, scenario, packaging, and extended soak testing.",
+   "contentLanguage": "en",
+   "githubUrl": "https://github.com/openclaw/openclaw/tree/main/.agents/skills/auto-qa",
+   "stars": 388044,
+   "forks": 81471,
+   "updatedAt": 1786893904,
+   "path": "SKILL.md",
+   "branch": "main",
+   "route": {
+    "ownerSlug": "openclaw",
+    "repoSlug": "openclaw",
+    "routeSlug": "agents-skills-auto-qa",
+    "sourceSkillPath": ".agents/skills/auto-qa/SKILL.md"
+   }
+  },
+  {
+   "id": "openclaw-openclaw-agents-skills-autoreview-skill-md",
+   "name": "autoreview",
+   "author": "openclaw",
+   "authorAvatar": "https://avatars.githubusercontent.com/u/252820863?v=4",
+   "description": "Structured Codex, Claude, Amp, Pi, or Kimi code review when explicitly requested.",
+   "contentLanguage": "en",
+   "githubUrl": "https://github.com/openclaw/openclaw/tree/main/.agents/skills/autoreview",
+   "stars": 388044,
+   "forks": 81471,
+   "updatedAt": 1788049207,
+   "path": "SKILL.md",
+   "branch": "main",
+   "route": {
+    "ownerSlug": "openclaw",
+    "repoSlug": "openclaw",
+    "routeSlug": "agents-skills-autoreview",
+    "sourceSkillPath": ".agents/skills/autoreview/SKILL.md"
+   }
+  }
+ ],
+ "pagination": {
+  "page": 1,
+  "limit": 12,
+  "total": 1200,
+  "totalPages": 100,
+  "hasNext": true,
+  "hasPrev": false,
+  "totalIsExact": false,
+  "isCapped": true,
+  "maxResults": 1200
+ }
+}
