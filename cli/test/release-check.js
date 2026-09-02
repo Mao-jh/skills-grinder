@@ -11,6 +11,7 @@
  */
 const { execFileSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { sanitize, truncate } = require('../lib/sanitize.js');
 const S = require('../lib/sources.js');
@@ -228,7 +229,7 @@ const fBigDed = W.dedupeWeb(fBig);
 check('回归:web 大数组去重', fBigDed.length === 150000, `15 万条去重不崩（${fBigDed.length} 条）`);
 // CLI 层：sg web 缺关键词应报错退出（不依赖网络，自包含）
 const rWebNoArg = runCli(['web']);
-check('回归:web 缺关键词报错', !rWebNoArg.ok && rWebNoArg.out.includes('用法: sg web'), 'sg web 无关键词非零退出并提示用法');
+check('回归:web 缺关键词报错', !rWebNoArg.ok && rWebNoArg.out.includes('缺少关键词'), 'sg web 无关键词非零退出并提示缺少关键词');
 
 // 回归 3.21b2: web 搜索三级分层评分（v0.8.1 默认配置，防空壳霸榜回归）
 // 背景：全量候选 99.4% 是 sitemap URL 空壳（名称即 URL 末段），旧评分下搜 "pdf" Top10 有 6 个空壳、
@@ -287,6 +288,95 @@ const syncE2E = (async () => {
 (async () => {
   const r = await syncE2E;
   check('回归:sync 端到端', r.ok, r.detail);
+
+  /* ---------- 契约层回归（v0.9.0，agent-first CLI 契约：退出码/帮助/schema/错误封套/输入加固/落盘） ---------- */
+  // 捕获退出码的 runner（execFileSync 非零退出时 status 为退出码）
+  function runStatus(args) {
+    try {
+      const out = execFileSync(NODE, [SG, ...args], { encoding: 'utf8' });
+      return { code: 0, out };
+    } catch (e) {
+      return { code: e.status === undefined ? 1 : e.status, out: (e.stdout || '') + (e.stderr || '') };
+    }
+  }
+
+  // 回归 3.23: 每个子命令独立 --help（输出 USAGE + NEXT，退出码 0）—— 主帮助不再展开全文
+  const helpCmds = ['latest', 'hot', 'search', 'web', 'preview', 'fetch', 'sources', 'sync', 'report', 'schema', 'selftest'];
+  const helpAllOk = helpCmds.every((c) => {
+    const r = runStatus([c, '--help']);
+    return r.code === 0 && /USAGE:/.test(r.out) && /NEXT:/.test(r.out);
+  });
+  check('契约:子命令 --help 全覆盖', helpAllOk, `${helpCmds.length} 个命令均有 USAGE+NEXT 帮助`);
+
+  // 回归 3.24: sg schema JSON 可解析且字段齐全（version/exitCodes/commands/arguments）
+  const rSch = runStatus(['schema']);
+  let schOk = false, schVer = '';
+  try {
+    const j = JSON.parse(rSch.out);
+    schVer = j.data.version;
+    schOk = j.ok === true && j.type === 'schema' && j.data.exitCodes['2'] === 'usage'
+      && j.data.exitCodes['5'] === 'not_found' && Array.isArray(j.data.commands) && j.data.commands.length >= 11
+      && j.data.commands.some((c) => c.name === 'search' && Array.isArray(c.arguments));
+  } catch { /* noop */ }
+  check('契约:schema JSON 完整', schOk, `version=${schVer}，命令数≥11，含 exitCodes 与 arguments`);
+
+  // 回归 3.24b: schema 单命令契约（search 必填参数 query 标记）
+  const rSchS = runStatus(['schema', 'search']);
+  let schSarg = false;
+  try { schSarg = JSON.parse(rSchS.out).data.commands[0].arguments.find((a) => a.name === 'query')?.required === true; } catch { /* noop */ }
+  check('契约:schema 单命令参数', schSarg, 'search.query 标记为必填');
+
+  // 回归 3.24c: 帮助与 schema 单一事实源（USAGE 行一致，防"文档与 --help 分叉"反模式）
+  const rHelpS = runStatus(['search', '--help']);
+  const helpUsage = (rHelpS.out.match(/USAGE:\n\s+(\S.*)/) || [])[1] || '';
+  const schemaUsage = (() => { try { return JSON.parse(rSchS.out).data.commands[0].usage; } catch { return ''; } })();
+  check('契约:帮助与 schema 单一事实源', !!helpUsage && helpUsage === schemaUsage, `USAGE="${helpUsage}"`);
+
+  // 回归 3.25: 退出码契约 —— 成功 0 / 用法 2 / 资源不存在 5
+  const rOk = runStatus(['preview', 'sheetagent']);
+  const rUsage = runStatus(['latest', '--limit', '0']);
+  const rMiss = runStatus(['preview', 'zzz-不存在-skill-zzz']);
+  check('契约:成功退出码 0', rOk.code === 0, `preview sheetagent → ${rOk.code}`);
+  check('契约:用法错误退出码 2', rUsage.code === 2, `latest --limit 0 → ${rUsage.code}`);
+  check('契约:资源不存在退出码 5', rMiss.code === 5, `preview 不存在名 → ${rMiss.code}`);
+
+  // 回归 3.25b: --json 模式错误走结构化封套（type=error / ok=false / code / next_actions），退出码 5
+  const rMissJ = runStatus(['preview', 'zzz-不存在-skill-zzz', '--json']);
+  let errEnvOk = false;
+  try {
+    const j = JSON.parse(rMissJ.out);
+    errEnvOk = j.type === 'error' && j.ok === false && j.data === null
+      && j.errors[0].code === 'not_found' && Array.isArray(j.errors[0].next_actions);
+  } catch { /* noop */ }
+  check('契约:--json 错误封套', errEnvOk && rMissJ.code === 5, `code=${rMissJ.code}，errors[0].code=not_found + next_actions`);
+
+  // 回归 3.25c: stdout 只承载数据 —— 成功命令的 --json 输出必须是纯 JSON（可 JSON.parse，无装饰）
+  const rJsonPure = runStatus(['search', '表格', '--json', '--limit', '3']);
+  let jsonPureOk = false;
+  try { jsonPureOk = Array.isArray(JSON.parse(rJsonPure.out)); } catch { /* noop */ }
+  check('契约:stdout 纯 JSON', jsonPureOk, 'search --json 输出可直接 JSON.parse');
+
+  // 回归 3.26: 查询输入加固 —— 控制字符/超长按用法错误（退出码 2），明确拒绝而非静默空结果
+  const rCtl = runStatus(['search', 'a\tb']);
+  const rLong = runStatus(['search', 'x'.repeat(105)]);
+  check('契约:控制字符拒绝', rCtl.code === 2, `控制字符查询 → ${rCtl.code}`);
+  check('契约:超长查询拒绝', rLong.code === 2, `105 字查询 → ${rLong.code}`);
+
+  // 回归 3.27: fetch --output-path 落盘 —— 文件存在、含 UNTRUSTED 隔离标记、--json 摘要可解析
+  const outFile = path.join(os.tmpdir(), `sg-rel-${Date.now()}.md`);
+  const rOut = runStatus(['fetch', 'sheetagent', '--output-path', outFile, '--json']);
+  let outOk = false, outTrunc = null;
+  try {
+    const j = JSON.parse(rOut.out);
+    outOk = j.ok === true && typeof j.path === 'string' && typeof j.bytes === 'number' && j.sanitized === true;
+    outTrunc = j.truncated;
+  } catch { /* noop */ }
+  const fileExists = fs.existsSync(outFile);
+  const fileMarked = fileExists && fs.readFileSync(outFile, 'utf8').includes('UNTRUSTED-DATA');
+  try { if (fileExists) fs.unlinkSync(outFile); } catch { /* noop */ }
+  check('契约:fetch --output-path 落盘', rOut.code === 0 && outOk && fileExists && fileMarked,
+    `写入文件=${fileExists}，含隔离标记=${fileMarked}，截断=${outTrunc}`);
+
   /* ---------- 4. 覆盖盲区提示（工具自省：让"该补哪些断言"可见，而非靠人肉回忆） ---------- */
   // 清单单一事实源：lib/coverage.js（sg report 输出同一份）。补了断言就把对应条目从清单里删除。
   console.log('\n# 覆盖盲区提示（以下功能面暂无断言，下次迭代优先补）');

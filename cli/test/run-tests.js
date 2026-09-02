@@ -1,10 +1,12 @@
 'use strict';
 /*
- * run-tests.js — CLI 集成测试（含安全层专项）
+ * run-tests.js — CLI 集成测试（含安全层专项 + 契约层）
  * 运行: node cli/test/run-tests.js
  */
 const { execFileSync } = require('child_process');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
 const SG = path.join(__dirname, '..', 'sg.js');
 const NODE = process.execPath;
@@ -34,6 +36,13 @@ const cases = [
   ['rank 加权排行', ['search', '文档', '--rank', 'mixed', '--limit', '5']],
   ['rank 自定义权重', ['search', '表格', '--rank', 'mixed', '--weights', 'match=0.5,usage=0.3,recency=0.2', '--limit', '3']],
   ['rank 非法权重报错', ['search', '表格', '--rank', 'mixed', '--weights', 'match=abc'], true],
+  // 契约层（v0.9.0）
+  ['help 顶层索引', ['help'], false, '命令索引'],
+  ['help 子命令 --help', ['search', '--help'], false, 'NEXT:'],
+  ['help help <命令>', ['help', 'fetch'], false, 'USAGE:'],
+  ['schema 全部(JSON)', ['schema'], false, '"type": "schema"'],
+  ['schema 单命令(JSON)', ['schema', 'search'], false, '"name": "search"'],
+  ['schema 单命令(text)', ['schema', 'fetch', '--text'], false, '## fetch'],
 ];
 
 // 边界输入组：把"过去靠人手动敲一遍"的非法/异常输入固化为自动回归
@@ -44,11 +53,19 @@ const edgeCases = [
   ['边界:limit 非数字报错', ['hot', '--limit', 'abc'], true],
   ['边界:search 空关键词报错', ['search'], true],
   ['边界:未知命令报错', ['foo-command'], true],
-  ['边界:preview 不存在名', ['preview', 'zzz-不存在-skill-zzz'], false, '未找到'],
-  ['边界:fetch 不存在名', ['fetch', 'zzz-不存在-skill-zzz'], false, '未找到'],
-  ['边界:fetch --skill 不存在', ['fetch', 'sheetagent', '--skill', 'zzz-不存在-skill-zzz'], false, '未找到 skill'],
+  ['边界:preview 不存在名', ['preview', 'zzz-不存在-skill-zzz'], true],
+  ['边界:fetch 不存在名', ['fetch', 'zzz-不存在-skill-zzz'], true],
+  ['边界:fetch --skill 不存在', ['fetch', 'sheetagent', '--skill', 'zzz-不存在-skill-zzz'], true],
+  ['边界:查询含控制字符拒绝', ['search', 'a\tb'], true],
+  ['边界:查询超长拒绝', ['search', 'x'.repeat(105)], true],
+  ['边界:--output-path 裸 flag 报错', ['fetch', 'sheetagent', '--output-path'], true],
+  ['边界:schema 未知命令报错', ['schema', 'zzz-no-such'], true],
 ];
 cases.push(...edgeCases);
+
+// fetch --output-path 落盘冒烟（临时文件，跑完清理）
+const OUT_TMP = path.join(os.tmpdir(), `sg-run-${Date.now()}.md`);
+cases.push(['fetch --output-path 落盘', ['fetch', 'sheetagent', '--output-path', OUT_TMP]]);
 
 let pass = 0, fail = 0;
 for (const [name, args, expectFail] of cases) {
@@ -62,6 +79,8 @@ for (const [name, args, expectFail] of cases) {
     fail++;
   }
 }
+
+try { fs.unlinkSync(OUT_TMP); } catch { /* noop */ }
 
 console.log(`\n结果: ${pass} 通过 / ${fail} 失败 / ${cases.length} 总用例`);
 process.exit(fail ? 1 : 0);

@@ -9,6 +9,10 @@
  *   S3 本地缓存镜像×3 ~/.workbuddy/plugins/cache/<mkt>/<plugin>/<version>/skills/<skill>/SKILL.md
  *   S4 远程同步镜像   cli/data/synced/<name>.json（sg sync 拉取，可配置）
  *
+ * 注意：S1–S3 的 ~/.workbuddy/... 是本机宿主的私有数据位（市场镜像实际所在，宿主自动管理），
+ *       属实现细节，不是本项目维护的分发标准。项目通用 skills 分发入口是 .skills（开放标准），
+ *       不围绕 .workbuddy 建小生态。
+ *
  * 热度信号：缓存目录中 .in_use/<pid> 文件数量（真实会话使用痕迹，按插件去重聚合）。
  * 新近信号：版本号内嵌 unix 时间戳（如 0.1.1787966564）+ 文件系统 mtime。
  */

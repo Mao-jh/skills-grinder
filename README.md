@@ -7,7 +7,8 @@ AI 第一用户的 skills 市场检索 CLI 工具。搜索外部 skills 获取�
 ## 快速上手
 
 ```bash
-node cli/sg.js help              # 帮助
+node cli/sg.js help              # 帮助（紧凑索引；sg <命令> --help 看单命令帮助）
+node cli/sg.js schema            # 机器可读命令契约（退出码/参数 schema/下一跳）
 node cli/sg.js search 表格        # 搜索（默认多信号加权 + 自动去重）
 node cli/sg.js web deep-research # 检索外部 web 直读源（5 站）
 node cli/sg.js preview sheetagent # 安全预览（清洗后摘要）

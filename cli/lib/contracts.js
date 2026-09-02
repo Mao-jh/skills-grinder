@@ -1,0 +1,205 @@
+'use strict';
+/*
+ * contracts.js — 命令契约与帮助的单一事实源
+ *
+ * 对齐 agent-first CLI 最佳实践：
+ *   - 帮助分层渐进披露：主帮助只给索引（L0），每个子命令独立 --help 给"下一跳"（L1）；
+ *   - 机器可读契约由 sg schema 内省（运行时暴露，不靠 agent 猜字段）；
+ *   - 人类帮助（sg <cmd> --help）与机器契约（sg schema）共用同一份数据，
+ *     杜绝"文档与 --help 分叉"（反模式 #13）。
+ *
+ * 字段语义（对齐"最小可执行规范"）：
+ *   sideEffect: read | write | network | internal
+ *   idempotent: 重复执行是否产生相同结果
+ *   args: 参数 schema（name/required/type/flag/position/default/maxLength）
+ *   errors: 该命令可能返回的错误类别（对应退出码）
+ *   next: 自省下一跳（帮助 NEXT 段）
+ */
+
+const COMMANDS = {
+  latest: {
+    name: 'latest',
+    description: '最新上架 skills（默认按版本新近排序，--rank 可融合热度/新近）',
+    usage: 'sg latest [--limit N] [--json] [--rank mixed]',
+    input: '--limit 正整数，默认 10；--rank mixed 多信号加权；--json 结构化输出',
+    output: '默认人类摘要（stdout）；--json 输出条目数组（name/version/market/usage/versionTs/description）',
+    sideEffect: 'read',
+    idempotent: true,
+    examples: ['sg latest --limit 5', 'sg latest --limit 3 --json'],
+    args: [
+      { name: 'limit', required: false, type: 'integer', flag: '--limit', default: 10 },
+      { name: 'json', required: false, type: 'boolean', flag: '--json' },
+      { name: 'rank', required: false, type: 'enum:off|mixed', flag: '--rank' },
+    ],
+    errors: ['usage'],
+    next: ['sg hot --limit 5', 'sg schema latest'],
+  },
+  hot: {
+    name: 'hot',
+    description: '最热 skills（按真实使用次数排序，--rank 可融合可用/新近）',
+    usage: 'sg hot [--limit N] [--json] [--rank mixed]',
+    input: '--limit 正整数，默认 10；--rank mixed 多信号加权；--json 结构化输出',
+    output: '默认人类摘要（stdout）；--json 输出条目数组（name/version/market/usage/versionTs/description）',
+    sideEffect: 'read',
+    idempotent: true,
+    examples: ['sg hot --limit 5', 'sg hot --limit 3 --json'],
+    args: [
+      { name: 'limit', required: false, type: 'integer', flag: '--limit', default: 10 },
+      { name: 'json', required: false, type: 'boolean', flag: '--json' },
+      { name: 'rank', required: false, type: 'enum:off|mixed', flag: '--rank' },
+    ],
+    errors: ['usage'],
+    next: ['sg latest --limit 5', 'sg schema hot'],
+  },
+  search: {
+    name: 'search',
+    description: '搜索本地六路源（官方/内置/团队/官方插件/缓存镜像/远程同步），默认多信号加权排序',
+    usage: 'sg search <关键词> [--limit N] [--json] [--rank off|mixed] [--weights match=0.45,avail=0.3,usage=0.15,recency=0.1]',
+    input: '<关键词> 必填（上限 100 字，拒绝控制字符）；--limit 正整数默认 8；--rank 默认 mixed，off 退回纯相关；--weights 自定义权重',
+    output: '默认人类摘要（stdout）；--json 输出条目数组（name/version/market/usage/available/description/rank）',
+    sideEffect: 'read',
+    idempotent: true,
+    examples: ['sg search 表格', 'sg search 文档 --rank off --limit 5', 'sg search pdf --json --limit 3'],
+    args: [
+      { name: 'query', required: true, type: 'string', position: 1, maxLength: 100 },
+      { name: 'limit', required: false, type: 'integer', flag: '--limit', default: 8 },
+      { name: 'json', required: false, type: 'boolean', flag: '--json' },
+      { name: 'rank', required: false, type: 'enum:off|mixed', flag: '--rank', default: 'mixed' },
+      { name: 'weights', required: false, type: 'string', flag: '--weights' },
+    ],
+    errors: ['usage'],
+    next: ['sg preview <名称>', 'sg web <关键词>', 'sg schema search'],
+  },
+  web: {
+    name: 'web',
+    description: '检索外部 web 直读源（SkillsMP/ClaudeSkills/Skills.sh/Skills.rest/SkillHub Club），跨源去重+三级分层',
+    usage: 'sg web <关键词> [--shallow] [--limit N] [--force] [--json]',
+    input: '<关键词> 必填（上限 100 字）；默认全量深拉（缓存 6h），--shallow 快速浅拉，--force 强制刷新缓存',
+    output: '默认人类摘要（stdout）；--json 输出条目数组（name/description/url/author/market/sources/score/tier）。拉取进度输出到 stderr',
+    sideEffect: 'network',
+    idempotent: true,
+    examples: ['sg web deep-research', 'sg web 表格 --shallow --limit 5', 'sg web pdf --force --json'],
+    args: [
+      { name: 'query', required: true, type: 'string', position: 1, maxLength: 100 },
+      { name: 'limit', required: false, type: 'integer', flag: '--limit', default: 10 },
+      { name: 'shallow', required: false, type: 'boolean', flag: '--shallow' },
+      { name: 'force', required: false, type: 'boolean', flag: '--force' },
+      { name: 'json', required: false, type: 'boolean', flag: '--json' },
+    ],
+    errors: ['usage', 'transient'],
+    next: ['sg schema web', 'sg search <关键词>'],
+  },
+  preview: {
+    name: 'preview',
+    description: '安全预览 skill 摘要（清洗后，默认 600 字 + 前 2 条示例，推荐动作）',
+    usage: 'sg preview <名称> [--json]',
+    input: '<名称> 必填（名称或关键词，会解析到最新版本）',
+    output: '默认 UNTRUSTED 隔离包装的人类摘要（stdout）；--json 输出 {name/version/market/source/usage/description/examples}',
+    sideEffect: 'read',
+    idempotent: true,
+    examples: ['sg preview sheetagent', 'sg preview sheetagent --json'],
+    args: [
+      { name: 'name', required: true, type: 'string', position: 1 },
+      { name: 'json', required: false, type: 'boolean', flag: '--json' },
+    ],
+    errors: ['usage', 'not_found'],
+    next: ['sg fetch <名称>', 'sg schema preview'],
+  },
+  fetch: {
+    name: 'fetch',
+    description: '安全获取 skill 正文（清洗后默认截断 3000 字；--full 放行 12000 字；--output-path 落盘返回路径）',
+    usage: 'sg fetch <名称> [--full] [--json] [--skill <skill名>] [--output-path <文件>]',
+    input: '<名称> 必填；--skill 只取插件内指定 skill；--output-path 把清洗后正文写入文件并返回路径+摘要（大输出不内联）',
+    output: '默认 UNTRUSTED 隔离包装正文（stdout，截断）；--json 输出 {sanitized/trust/report/content}；--output-path 输出 {ok/path/count/bytes/truncated}',
+    sideEffect: 'read',
+    idempotent: true,
+    examples: ['sg fetch sheetagent', 'sg fetch sheetagent --full', 'sg fetch sheetagent --skill excel-handler --output-path out.md'],
+    args: [
+      { name: 'name', required: true, type: 'string', position: 1 },
+      { name: 'full', required: false, type: 'boolean', flag: '--full' },
+      { name: 'json', required: false, type: 'boolean', flag: '--json' },
+      { name: 'skill', required: false, type: 'string', flag: '--skill' },
+      { name: 'output-path', required: false, type: 'path', flag: '--output-path' },
+    ],
+    errors: ['usage', 'not_found'],
+    next: ['sg preview <名称>', 'sg schema fetch'],
+  },
+  sources: {
+    name: 'sources',
+    description: '数据源状态（S1 官方 / S2 插件×3 / S3 本地缓存镜像 / S4 远程同步 / S5 web 直读源）',
+    usage: 'sg sources',
+    input: '无参数',
+    output: '人类可读数据源清单（stdout）',
+    sideEffect: 'read',
+    idempotent: true,
+    examples: ['sg sources'],
+    args: [],
+    errors: [],
+    next: ['sg web <关键词>', 'sg schema sources'],
+  },
+  sync: {
+    name: 'sync',
+    description: '从任意远程 skills 网站拉取市场索引（marketplace.json，落盘 data/synced/）',
+    usage: 'sg sync --url <URL> [--name 名称]',
+    input: '--url 必填（JSON marketplace 地址）；--name 可选（默认取 URL 末段）',
+    output: '同步结果摘要（stdout：名称/文件/条目数）',
+    sideEffect: 'write',
+    idempotent: false,
+    examples: ['sg sync --url https://example.com/marketplace.json', 'sg sync --url https://example.com/marketplace.json --name my-mkt'],
+    args: [
+      { name: 'url', required: true, type: 'url', flag: '--url' },
+      { name: 'name', required: false, type: 'string', flag: '--name' },
+    ],
+    errors: ['usage', 'transient'],
+    next: ['sg search <关键词>', 'sg schema sync'],
+  },
+  report: {
+    name: 'report',
+    description: '生成迭代素材包（版本/数据源统计/测试结果/覆盖盲区/与上次自动 diff）',
+    usage: 'sg report [--to <文件>] [--json]',
+    input: '--to 写入 markdown 文件（返回绝对路径）；--json 输出结构化 JSON（含 diff 字段）',
+    output: '默认 markdown 素材包（stdout）；--to 写入文件；--json 输出结构化 JSON',
+    sideEffect: 'write',
+    idempotent: false,
+    examples: ['sg report', 'sg report --to report.md', 'sg report --json'],
+    args: [
+      { name: 'to', required: false, type: 'path', flag: '--to' },
+      { name: 'json', required: false, type: 'boolean', flag: '--json' },
+    ],
+    errors: ['usage'],
+    next: ['sg selftest', 'sg schema report'],
+  },
+  selftest: {
+    name: 'selftest',
+    description: '安全层自检（URL 抹除/敏感擦除/注入中和/残留检测/业务内容保留，含注入样本）',
+    usage: 'sg selftest',
+    input: '无参数',
+    output: '人类可读自检结果（stdout：PASS/FAIL 清单，末尾 结果: N/5 通过）',
+    sideEffect: 'read',
+    idempotent: true,
+    examples: ['sg selftest'],
+    args: [],
+    errors: [],
+    next: ['sg report', 'sg schema selftest'],
+  },
+  schema: {
+    name: 'schema',
+    description: '机器可读命令契约内省（命令清单/参数 schema/副作用/退出码/下一跳；帮助与 schema 共用同一份契约）',
+    usage: 'sg schema [命令] [--text]',
+    input: '[命令] 可选（省略=全部命令）；--text 人类可读格式（默认 JSON 契约）',
+    output: '默认 JSON 契约（schemaVersion/type/ok/data{version,exitCodes,commands}/meta）；--text 人类可读',
+    sideEffect: 'read',
+    idempotent: true,
+    examples: ['sg schema', 'sg schema search', 'sg schema fetch --text'],
+    args: [
+      { name: 'command', required: false, type: 'string', position: 1 },
+      { name: 'text', required: false, type: 'boolean', flag: '--text' },
+    ],
+    errors: ['usage'],
+    next: ['sg <命令> --help', 'sg help'],
+  },
+};
+
+const COMMAND_ORDER = ['latest', 'hot', 'search', 'web', 'preview', 'fetch', 'sources', 'sync', 'report', 'selftest', 'schema'];
+
+module.exports = { COMMANDS, COMMAND_ORDER };
