@@ -13,6 +13,7 @@ node cli/sg.js search 表格        # 搜索（默认多信号加权 + 自动去
 node cli/sg.js web deep-research # 检索外部 web 直读源（5 站）
 node cli/sg.js preview sheetagent # 安全预览（清洗后摘要）
 node cli/sg.js fetch sheetagent  # 获取正文（清洗后，默认截断）
+node cli/sg.js gap 表格           # 缺口分析：市场 vs web 对照，判定缺失技能（v0.12.0）
 ```
 
 ## 目录

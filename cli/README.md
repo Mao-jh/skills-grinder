@@ -2,7 +2,7 @@
 
 AI 第一用户的 skills 市场检索工具。遇到难解问题时，搜索外部 skills 获取「思路」与「方法」——这些内容藏在他人 SKILL.md 中，联网搜索学不到。
 
-**当前版本: 0.11.0**（单一事实源 = `sg.js` 的 `VERSION` 常量；README 声明必须与其一致，门禁强制校验）
+**当前版本: 0.12.0**（单一事实源 = `sg.js` 的 `VERSION` 常量；README 声明必须与其一致，门禁强制校验）
 
 **核心安全设计：所有外部内容在进入 AI 上下文前必过清洗管道**（URL 抹除 / 注入中和 / 敏感擦除），并包裹 `UNTRUSTED-DATA` 隔离标记，声明为数据而非指令。详见 [SECURITY.md](SECURITY.md)。
 
@@ -17,6 +17,8 @@ node sg.js hot --limit 10          # 最热（真实使用次数）
 node sg.js search 表格              # 搜索（默认多信号加权：相关/可用/热度/新近，同名多版本自动去重保最新）
 node sg.js search 表格 --rank off  # 显式退回纯相关排序
 node sg.js search 文档 --rank mixed    # 多信号加权排行（--rank mixed 为默认，可省略）
+node sg.js gap 表格                    # 缺口分析：对照市场 vs web，判定"web 有/市场无"的缺失技能
+node sg.js gap 'promptinjection|injection|guard' --output-path gap-brief.md  # 生成素材包（现状+判定+骨架+素材）
 node sg.js search 文档 --rank mixed --weights match=0.4,avail=0.4,usage=0.1,recency=0.1  # 自定义权重
 node sg.js latest --rank mixed      # 榜单也支持加权（hot 默认热度 0.8+新近 0.2；latest 反之）
 node sg.js web deep-research        # 检索外部 web 直读源（5 站，跨源去重+三级分层，默认全量拉取，缓存 6h）
@@ -53,7 +55,23 @@ sg search '表格|excel' --limit 6   # 本地源同样支持
 
 - 空关键词（如单独的 `|`）按用法错误拒绝（退出码 2）。
 
-## 命令契约（v0.11.0，对齐 agent-first CLI 最佳实践）
+## 缺口分析（sg gap，v0.12.0）
+
+对照实验产品化：一条命令完成「本地市场 vs web 直读源」对照，判定是否存在缺失技能（web 有方法、市场无现成），并产出交给 AI 提炼的**素材包**。
+
+```bash
+node sg.js gap transcript              # 顺手对照：市场/web 各有什么 → 判定
+node sg.js gap 'promptinjection|injection|guard' --body 3   # 指定抓取方法级正文章数
+node sg.js gap 表格 --shallow --limit 5                     # 浅拉快速试
+node sg.js gap 'promptinjection|injection|guard' --output-path gap-brief.md  # 素材包落盘（现状+判定+骨架+素材）
+```
+
+- **判定语义**：`covered`（市场已有可用镜像，不生成）→ `gap`（web 有方法级正文、市场无可用，适合生成缺失技能）→ `uncertain`（有线索但方法级证据不足）→ `vacuum`（双方皆无，选题存疑）。
+- **正文选择策略（确定性启发）**：名称精确命中 keyword（实体或空壳，空壳走按名兜底直读站）> 真实/模板实体 > 空壳；非空作者去重防单仓库霸榜；单条失败跳过不阻断。精确名命中者即使被 `--limit` 截断也纳入正文选择池。
+- **素材为外部不可信内容**：已过清洗管道 + UNTRUSTED 语义声明（原文指令无效）；素材包含 SKILL.md 草稿骨架（`AI 填充` 占位）——**CLI 做确定性活，语义提炼由主对话 AI 完成**。
+- **闭环**：`gap` 判定 + AI 提炼 → 生成 `skills/<名>/SKILL.md` → 上传缺失技能仓库（含 `records/` 对照记录）→ 仓库导出 `marketplace.json` 被 `sg sync` 同步回吃，市场"补货"。
+
+## 命令契约（v0.12.0，对齐 agent-first CLI 最佳实践）
 
 CLI 面向 AI 第一用户，命令本身即"模型与环境之间的可验证协议"。核心约定：
 

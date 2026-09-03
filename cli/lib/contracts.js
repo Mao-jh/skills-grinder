@@ -144,6 +144,27 @@ const COMMANDS = {
     errors: ['usage', 'transient', 'not_found'],
     next: ['sg preview <名称>', 'sg schema fetch-body'],
   },
+  gap: {
+    name: 'gap',
+    description: '缺口分析：对照本地市场 vs web 直读源，判定是否存在缺失技能（web 有/市场无）并产出 SKILL.md 素材包——对照实验产品化',
+    usage: 'sg gap <关键词A|关键词B> [--limit N] [--body N] [--shallow] [--force] [--json] [--output-path <文件>]',
+    input: '<关键词> 必填（上限 100 字，支持 | 分隔多关键词）；--limit web 候选展示数默认 10；--body 自动抓取的方法级正文章数默认 2；--output-path 把完整素材包（现状+判定+骨架+素材）写入文件返回路径；--shallow 浅拉；--force 刷新缓存',
+    output: '默认人类摘要（stdout：判定+现状+下一步）；--output-path 落盘素材包返回路径；--json 结构化 {task/verdict/reason/market/web/bodies/brief/next_actions}',
+    sideEffect: 'network',
+    idempotent: false,
+    examples: ['sg gap transcript', "sg gap 'transcript|转写|whisper' --body 3", "sg gap 'promptinjection|injection|guard' --output-path gap-brief.md", 'sg gap 表格 --shallow --limit 5'],
+    args: [
+      { name: 'query', required: true, type: 'string', position: 1, maxLength: 100 },
+      { name: 'limit', required: false, type: 'integer', flag: '--limit', default: 10 },
+      { name: 'body', required: false, type: 'integer', flag: '--body', default: 2 },
+      { name: 'shallow', required: false, type: 'boolean', flag: '--shallow' },
+      { name: 'force', required: false, type: 'boolean', flag: '--force' },
+      { name: 'json', required: false, type: 'boolean', flag: '--json' },
+      { name: 'output-path', required: false, type: 'path', flag: '--output-path' },
+    ],
+    errors: ['usage', 'transient'],
+    next: ['sg fetch-body <名称>', 'sg web <关键词>', 'sg schema gap'],
+  },
   sources: {
     name: 'sources',
     description: '数据源状态（S1 官方 / S2 插件×3 / S3 本地缓存镜像 / S4 远程同步 / S5 web 直读源）',
@@ -220,6 +241,6 @@ const COMMANDS = {
   },
 };
 
-const COMMAND_ORDER = ['latest', 'hot', 'search', 'web', 'preview', 'fetch', 'fetch-body', 'sources', 'sync', 'report', 'selftest', 'schema'];
+const COMMAND_ORDER = ['latest', 'hot', 'search', 'web', 'gap', 'preview', 'fetch', 'fetch-body', 'sources', 'sync', 'report', 'selftest', 'schema'];
 
 module.exports = { COMMANDS, COMMAND_ORDER };

@@ -45,8 +45,9 @@ const { rankCandidates, parseWeights } = require('./lib/rank.js');
 const { COVERAGE_GAPS } = require('./lib/coverage.js');
 const { EXIT, CODE_NAME, fail } = require('./lib/errors.js');
 const { COMMANDS, COMMAND_ORDER } = require('./lib/contracts.js');
+const GAP = require('./lib/gap.js');
 
-const VERSION = '0.11.0';
+const VERSION = '0.12.0';
 const PREVIEW_DESC_MAX = 600;
 const PREVIEW_EXAMPLE_N = 2;
 const FETCH_BODY_DEFAULT = 3000;
@@ -762,6 +763,142 @@ async function cmdWeb(args) {
   }
 }
 
+/* ---------- 缺口分析（对照实验产品化） ---------- */
+async function cmdGap(args) {
+  const jsonFlag = !!args.json;
+  const q = validateQuery((args._[1] || '').trim(), jsonFlag, '关键词', 'sg gap <关键词>');
+  const tasks = splitKeywords(q);
+  if (!tasks.length) {
+    fail(EXIT.USAGE, '关键词为空（仅有 | 分隔符）', {
+      json: jsonFlag,
+      next_actions: [{ command: 'sg gap transcript|转写', description: '在两个 | 之间填入关键词，可混用不同语言' }],
+    });
+  }
+  const limit = parseLimit(args.limit, 10, jsonFlag);
+  const bodyN = parseLimit(args.body, 2, jsonFlag);
+  const deep = args.shallow ? false : true;
+
+  // 1) 本地市场 top5（镜像可用=能读正文）
+  const market = dedupByName(matchCandidatesMulti(buildCandidates(), q, 50)).slice(0, 5).map((c) => ({
+    name: c.name, version: c.version, market: c.market,
+    mirror: !!c.mirror, description: sanitize(c.description).text.slice(0, 200),
+  }));
+
+  // 2) web 深拉 + 打分（与 sg web 同款三级分层逻辑）
+  console.error('拉取 web 直读源（全量模式，缓存 6h）...');
+  let items = [];
+  try {
+    ({ items } = await W.pullAllWeb({ deep, force: !!args.force }));
+  } catch (e) {
+    fail(EXIT.TRANSIENT, `web 源拉取失败（网络/外部服务，可重试）: ${e.message}`, {
+      json: jsonFlag,
+      retryable: true,
+      next_actions: [{ command: 'sg gap ' + q + ' --shallow', description: '改用快速浅拉重试，或稍后重试' }],
+    });
+  }
+  const qls = tasks.map((t) => t.toLowerCase());
+  const scored = [];
+  for (const it of items) {
+    let best = 0; const matched = [];
+    for (const kw of qls) {
+      const s = W.scoreWeb(it, kw);
+      if (s > 0) { matched.push(kw); if (s > best) best = s; }
+    }
+    if (matched.length) scored.push({ it, s: best, kws: matched });
+  }
+  scored.sort((a, b) => b.s - a.s);
+  const webTop = scored.slice(0, limit);
+  const web = webTop.map((x) => ({
+    name: x.it.name, url: x.it.url, author: x.it.author, tier: W.entryTier(x.it), score: x.s,
+    description: sanitize(x.it.description).text.slice(0, 200),
+  }));
+  // 名称精确命中 keyword 者即使被 limit 截断也纳入正文选择池（名称即主题的最强确定性信号）
+  const qlsExact = new Set(tasks.map((t) => t.toLowerCase()));
+  const extraExact = scored.filter((x) => qlsExact.has((x.it.name || '').toLowerCase()) && !webTop.some((w) => w.it.name === x.it.name));
+
+  // 3) 自动 fetch-body 选择策略（确定性启发）：
+  //    名称精确命中（实体或空壳，空壳走按名兜底直读站）> 真实/模板实体 > 空壳；
+  //    非空作者去重（防单仓库霸榜）；单条失败跳过不阻断
+  const kws = tasks.map((t) => t.toLowerCase());
+  const pickRank = (x) => {
+    const nm = (x.it.name || '').toLowerCase();
+    const exact = kws.includes(nm);
+    const tier = W.entryTier(x.it);
+    if (exact) return 0;
+    if (tier !== 'shell') return 1;
+    return 3;
+  };
+  const pickPool = [...webTop, ...extraExact]
+    .filter((x) => (x.it.url || pickRank(x) === 0))
+    .sort((a, b) => pickRank(a) - pickRank(b) || b.s - a.s);
+  const bodies = [];
+  const seenAuthor = new Set();
+  for (const x of pickPool) {
+    const author = String(x.it.author || '');
+    if (author && seenAuthor.has(author.toLowerCase())) continue;
+    try {
+      const entry = B.findWebEntry(x.it.name) || x.it.url;
+      const res = await B.fetchBody(entry, { force: !!args.force, name: x.it.name });
+      if (res && res.body) {
+        const s = sanitize(res.body);
+        bodies.push({
+          name: x.it.name, url: res.url, via: res.via,
+          text: s.text,
+          report: { removedUrls: s.removedUrls, neutralized: s.neutralized, scrubbed: s.scrubbed },
+        });
+        if (author) seenAuthor.add(author.toLowerCase());
+      }
+    } catch { /* 单条正文失败跳过 */ }
+    if (bodies.length >= bodyN) break;
+  }
+
+  // 4) 判定 + 素材包
+  const analysis = GAP.analyzeGap({ market, web, bodies });
+  const brief = GAP.buildBrief(q, { keywords: tasks, market, web, bodies, verdict: analysis.verdict, reason: analysis.reason });
+  const next = GAP.nextActions({ verdict: analysis.verdict }, q);
+  const skeletonName = GAP.suggestName(tasks);
+
+  const outPath = (args['output-path'] || '').trim();
+  if (outPath) {
+    const abs = path.resolve(outPath);
+    fs.writeFileSync(abs, brief, 'utf8');
+    const bytes = Buffer.byteLength(brief, 'utf8');
+    if (jsonFlag) {
+      console.log(JSON.stringify({ ok: true, path: abs, bytes, verdict: analysis.verdict, reason: analysis.reason, next_actions: next }, null, 2));
+    } else {
+      console.log(`已写入素材包: ${abs}`);
+      console.log(`  判定: ${analysis.verdict.toUpperCase()} — ${analysis.reason}`);
+      console.log(`  字节: ${bytes}  |  建议名称: ${skeletonName}`);
+    }
+    return;
+  }
+
+  if (jsonFlag) {
+    console.log(JSON.stringify({
+      task: q, verdict: analysis.verdict, reason: analysis.reason,
+      suggested_name: skeletonName,
+      counts: { marketHits: market.length, marketUsable: market.filter((c) => c.mirror).length, webCandidates: items.length, webTop: web.length, bodiesFetched: bodies.length },
+      market, web,
+      bodies: bodies.map((b) => ({ name: b.name, via: b.via, report: b.report, text: b.text.slice(0, 600) })),
+      brief, next_actions: next,
+    }, null, 2));
+    return;
+  }
+
+  const verdictMark = { covered: '✔ 已有覆盖', gap: '◇ 存在缺口', uncertain: '? 证据不足', vacuum: '✘ 双方皆无' }[analysis.verdict] || analysis.verdict;
+  console.log(`# sg gap「${q}」—— ${verdictMark}`);
+  console.log(`判定: ${analysis.reason}`);
+  console.log(`市场: 命中 ${market.length} 条（可用镜像 ${market.filter((c) => c.mirror).length}）  |  web: 命中 ${web.length} / ${items.length} 候选  |  已抓正文 ${bodies.length} 篇`);
+  if (bodies.length) {
+    console.log('正文: ' + bodies.map((b) => `${b.name}(${(b.report.removedUrls || 0)} URL移除)`).join('，'));
+  }
+  console.log('下一步:');
+  for (const a of next) console.log(`  - ${a.command}  — ${a.description}`);
+  if (analysis.verdict === 'gap') {
+    console.log(`\n[提示] 生成素材包（含 SKILL.md 骨架）: sg gap ${q.includes('|') ? `'${q}'` : q} --output-path gap-brief.md`);
+  }
+}
+
 function cmdSources() {
   const { official, builtin, teams, officialPlugins, mirrors } = S.collectSources();
   const synced = S.loadSynced();
@@ -1123,7 +1260,7 @@ function main() {
   if (COMMANDS[cmd] && (args.help || args.h)) return showCommandHelp(cmd);
 
   if (cmd === 'schema') return cmdSchema(args);
-  const handlers = { latest: cmdList.bind(null, 'latest'), hot: cmdList.bind(null, 'hot'), search: cmdSearch, web: cmdWeb, preview: cmdPreview, fetch: cmdFetch, 'fetch-body': cmdFetchBody, sources: cmdSources, sync: cmdSync, report: cmdReport, selftest: cmdSelfTest };
+  const handlers = { latest: cmdList.bind(null, 'latest'), hot: cmdList.bind(null, 'hot'), search: cmdSearch, web: cmdWeb, gap: cmdGap, preview: cmdPreview, fetch: cmdFetch, 'fetch-body': cmdFetchBody, sources: cmdSources, sync: cmdSync, report: cmdReport, selftest: cmdSelfTest };
   const h = handlers[cmd];
   if (!h) {
     fail(EXIT.USAGE, `未知命令: ${cmd}（用 sg help 查看命令索引）`, {

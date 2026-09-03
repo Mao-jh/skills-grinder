@@ -302,7 +302,7 @@ const syncE2E = (async () => {
   }
 
   // 回归 3.23: 每个子命令独立 --help（输出 USAGE + NEXT，退出码 0）—— 主帮助不再展开全文
-  const helpCmds = ['latest', 'hot', 'search', 'web', 'preview', 'fetch', 'sources', 'sync', 'report', 'schema', 'selftest'];
+  const helpCmds = ['latest', 'hot', 'search', 'web', 'gap', 'preview', 'fetch', 'sources', 'sync', 'report', 'schema', 'selftest'];
   const helpAllOk = helpCmds.every((c) => {
     const r = runStatus([c, '--help']);
     return r.code === 0 && /USAGE:/.test(r.out) && /NEXT:/.test(r.out);
@@ -332,6 +332,18 @@ const syncE2E = (async () => {
   const helpUsage = (rHelpS.out.match(/USAGE:\n\s+(\S.*)/) || [])[1] || '';
   const schemaUsage = (() => { try { return JSON.parse(rSchS.out).data.commands[0].usage; } catch { return ''; } })();
   check('契约:帮助与 schema 单一事实源', !!helpUsage && helpUsage === schemaUsage, `USAGE="${helpUsage}"`);
+
+  // 回归 3.24d: gap 判定纯函数（离线单测：covered / gap / uncertain / vacuum 三态）
+  const GAP = require('../lib/gap.js');
+  const g1 = GAP.analyzeGap({ market: [{ name: 'x', mirror: true, description: '有可用镜像' }], web: [], bodies: [] });
+  const g2 = GAP.analyzeGap({ market: [{ name: 'x', mirror: false, description: '仅索引' }], web: [{ name: 'w' }], bodies: [{ name: 'w', text: 'x'.repeat(300) }] });
+  const g3 = GAP.analyzeGap({ market: [], web: [{ name: 'w' }], bodies: [] });
+  const g4 = GAP.analyzeGap({ market: [], web: [], bodies: [] });
+  check('回归:gap 判定四态', g1.verdict === 'covered' && g2.verdict === 'gap' && g3.verdict === 'uncertain' && g4.verdict === 'vacuum',
+    `covered/gap/uncertain/vacuum = ${g1.verdict}/${g2.verdict}/${g3.verdict}/${g4.verdict}`);
+  check('回归:gap 骨架含 AI 占位', GAP.buildSkeleton('test-skill', 'task').includes('AI 填充') && GAP.buildSkeleton('test-skill', 'task').includes('name: test-skill'),
+    '骨架 frontmatter name 与占位节存在');
+  check('回归:gap 建议名 kebab 化', GAP.suggestName(['Prompt Injection!!']) === 'prompt-injection', GAP.suggestName(['Prompt Injection!!']));
 
   // 回归 3.25: 退出码契约 —— 成功 0 / 用法 2 / 资源不存在 5
   const rOk = runStatus(['preview', 'sheetagent']);

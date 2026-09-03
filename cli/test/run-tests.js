@@ -76,13 +76,22 @@ cases.push(
   ['边界:web 仅|空词拒绝', ['web', '||'], true],
 );
 
-// web 多关键词（仅在有深拉缓存时跑，无缓存=全新环境自动跳过，不依赖网络）
+// gap 缺口分析（v0.12.0）：静态用例离线可跑；完整判定用例仅在有 web 深拉缓存时跑
+cases.push(
+  ['gap help', ['gap', '--help'], false, 'USAGE:'],
+  ['gap schema', ['schema', 'gap'], false, '"name": "gap"'],
+  ['边界:gap 空关键词报错', ['gap'], true],
+  ['边界:gap 仅|空词报错', ['gap', '|'], true],
+  ['边界:gap limit 非法报错', ['gap', 'test', '--limit', '-1'], true],
+  ['边界:gap body 非法报错', ['gap', 'test', '--body', '0'], true],
+);
 try {
   const skillshCache = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data', 'web-cache', 'skillssh.json'), 'utf8'));
   if (skillshCache.mode === 'deep' && Date.now() - skillshCache.fetchedAt < 6 * 3600 * 1000) {
     cases.push(
       ['web 多关键词|合并(缓存)', ['web', 'transcript|youtube', '--limit', '12'], false, 'youtube-transcript'],
       ['web 多关键词命中标注(缓存)', ['web', 'transcript|youtube', '--limit', '12'], false, '命中: transcript | youtube'],
+      ['gap 判定(缓存)', ['gap', 'promptinjection|injection', '--body', '1'], false, '判定:'],
     );
   }
 } catch { /* 无 web 深拉缓存，跳过 web 多关键词用例 */ }
