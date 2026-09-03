@@ -53,13 +53,13 @@ const COMMANDS = {
   },
   search: {
     name: 'search',
-    description: '搜索本地六路源（官方/内置/团队/官方插件/缓存镜像/远程同步），默认多信号加权排序',
-    usage: 'sg search <关键词> [--limit N] [--json] [--rank off|mixed] [--weights match=0.45,avail=0.3,usage=0.15,recency=0.1]',
-    input: '<关键词> 必填（上限 100 字，拒绝控制字符）；--limit 正整数默认 8；--rank 默认 mixed，off 退回纯相关；--weights 自定义权重',
-    output: '默认人类摘要（stdout）；--json 输出条目数组（name/version/market/usage/available/description/rank）',
+    description: '搜索本地六路源（官方/内置/团队/官方插件/缓存镜像/远程同步），默认多信号加权排序；支持 | 分隔多关键词分别检索后合并',
+    usage: 'sg search <关键词A|关键词B> [--limit N] [--json] [--rank off|mixed] [--weights match=0.45,avail=0.3,usage=0.15,recency=0.1]',
+    input: '<关键词> 必填（上限 100 字，拒绝控制字符）；用 | 分隔可一次检索多个关键词（不同语言/写法，分别检索后合并，JSON 输出 matched）；--limit 正整数默认 8；--rank 默认 mixed，off 退回纯相关；--weights 自定义权重',
+    output: '默认人类摘要（stdout）；--json 输出条目数组（name/version/market/usage/available/description/rank/matched）',
     sideEffect: 'read',
     idempotent: true,
-    examples: ['sg search 表格', 'sg search 文档 --rank off --limit 5', 'sg search pdf --json --limit 3'],
+    examples: ['sg search 表格', 'sg search 文档 --rank off --limit 5', 'sg search pdf --json --limit 3', 'sg search 表格|excel --limit 5'],
     args: [
       { name: 'query', required: true, type: 'string', position: 1, maxLength: 100 },
       { name: 'limit', required: false, type: 'integer', flag: '--limit', default: 8 },
@@ -72,13 +72,13 @@ const COMMANDS = {
   },
   web: {
     name: 'web',
-    description: '检索外部 web 直读源（SkillsMP/ClaudeSkills/Skills.sh/Skills.rest/SkillHub Club），跨源去重+三级分层',
-    usage: 'sg web <关键词> [--shallow] [--limit N] [--force] [--json]',
-    input: '<关键词> 必填（上限 100 字）；默认全量深拉（缓存 6h），--shallow 快速浅拉，--force 强制刷新缓存',
-    output: '默认人类摘要（stdout）；--json 输出条目数组（name/description/url/author/market/sources/score/tier）。拉取进度输出到 stderr',
+    description: '检索外部 web 直读源（SkillsMP/ClaudeSkills/Skills.sh/Skills.rest/SkillHub Club），跨源去重+三级分层；支持 | 分隔多关键词分别检索后合并',
+    usage: 'sg web <关键词A|关键词B> [--shallow] [--limit N] [--force] [--json]',
+    input: '<关键词> 必填（上限 100 字）；用 | 分隔可一次检索多个关键词（S5 为英文目录站，建议英文单词；不同语言/写法可并列，JSON 输出 matched）；默认全量深拉（缓存 6h），--shallow 快速浅拉，--force 强制刷新缓存。注意检索为整串子串匹配，勿用含空格短语',
+    output: '默认人类摘要（stdout）；--json 输出条目数组（name/description/url/author/market/sources/score/tier/matched）。拉取进度输出到 stderr',
     sideEffect: 'network',
     idempotent: true,
-    examples: ['sg web deep-research', 'sg web 表格 --shallow --limit 5', 'sg web pdf --force --json'],
+    examples: ['sg web deep-research', 'sg web 表格 --shallow --limit 5', 'sg web pdf --force --json', 'sg web transcript|转写|whisper'],
     args: [
       { name: 'query', required: true, type: 'string', position: 1, maxLength: 100 },
       { name: 'limit', required: false, type: 'integer', flag: '--limit', default: 10 },
@@ -122,7 +122,27 @@ const COMMANDS = {
       { name: 'output-path', required: false, type: 'path', flag: '--output-path' },
     ],
     errors: ['usage', 'not_found'],
-    next: ['sg preview <名称>', 'sg schema fetch'],
+    next: ['sg preview <名称>', 'sg fetch-body <名称>', 'sg schema fetch'],
+  },
+  'fetch-body': {
+    name: 'fetch-body',
+    description: '安全获取 web 源 skill 的完整 SKILL.md 正文（GitHub/直读站解析，复用清洗管道；可选只读 GitHub token 提升 API 限流）',
+    usage: 'sg fetch-body <名称|URL> [--full] [--json] [--output-path <文件>] [--force] [--github-token <token>]',
+    input: '<名称|URL> 必填（上限 500 字）：web 源 skill 名称（自动查 web 缓存取链接）或完整链接；--full 放行 12000 字；--force 跳过正文缓存；--github-token 可选只读 token（或 SG_GITHUB_TOKEN 环境变量），仅发往 GitHub 域名、永不回显',
+    output: '默认 UNTRUSTED 隔离包装正文（stdout，截断）；--json 输出 {sanitized/trust/report/content}；--output-path 落盘返回路径+摘要',
+    sideEffect: 'network',
+    idempotent: false,
+    examples: ['sg fetch-body youtube-transcript', 'sg fetch-body youtube-transcript --full', 'sg fetch-body https://github.com/x/y/tree/main/skills/z --output-path out.md'],
+    args: [
+      { name: 'query', required: true, type: 'string', position: 1, maxLength: 500 },
+      { name: 'full', required: false, type: 'boolean', flag: '--full' },
+      { name: 'json', required: false, type: 'boolean', flag: '--json' },
+      { name: 'output-path', required: false, type: 'path', flag: '--output-path' },
+      { name: 'force', required: false, type: 'boolean', flag: '--force' },
+      { name: 'github-token', required: false, type: 'string', flag: '--github-token' },
+    ],
+    errors: ['usage', 'transient', 'not_found'],
+    next: ['sg preview <名称>', 'sg schema fetch-body'],
   },
   sources: {
     name: 'sources',
@@ -200,6 +220,6 @@ const COMMANDS = {
   },
 };
 
-const COMMAND_ORDER = ['latest', 'hot', 'search', 'web', 'preview', 'fetch', 'sources', 'sync', 'report', 'selftest', 'schema'];
+const COMMAND_ORDER = ['latest', 'hot', 'search', 'web', 'preview', 'fetch', 'fetch-body', 'sources', 'sync', 'report', 'selftest', 'schema'];
 
 module.exports = { COMMANDS, COMMAND_ORDER };

@@ -29,6 +29,8 @@ const cases = [
   ['preview 预览(索引)', ['preview', '腾讯文档']],
   ['preview 预览(镜像)', ['preview', 'sheetagent']],
   ['fetch 正文(镜像,清洗)', ['fetch', 'sheetagent']],
+  ['fetch-body help', ['fetch-body', '--help'], false, 'USAGE:'],
+  ['fetch-body schema', ['schema', 'fetch-body'], false, '"name": "fetch-body"'],
   ['sources 数据源', ['sources']],
   ['search 团队市场', ['search', 'deep-research', '--limit', '3']],
   ['search 官方插件市场', ['search', 'find-skills', '--limit', '3']],
@@ -59,8 +61,31 @@ const edgeCases = [
   ['边界:查询含控制字符拒绝', ['search', 'a\tb'], true],
   ['边界:查询超长拒绝', ['search', 'x'.repeat(105)], true],
   ['边界:--output-path 裸 flag 报错', ['fetch', 'sheetagent', '--output-path'], true],
+  ['边界:fetch-body 空参数报错', ['fetch-body'], true],
+  ['边界:fetch-body 未知名报错', ['fetch-body', 'zzz-不存在-skill-zzz'], true],
+  ['边界:fetch-body --github-token 裸 flag 报错', ['fetch-body', 'zzz-skill', '--github-token'], true],
   ['边界:schema 未知命令报错', ['schema', 'zzz-no-such'], true],
 ];
+
+// 多关键词（| 分隔，分别检索后合并 v0.11.0）：共享切词逻辑，本地 search 离线可测
+cases.push(
+  ['search 多关键词|合并', ['search', '文档|表格', '--limit', '20'], false, '腾讯文档'],
+  ['search 多关键词带空格', ['search', '  表格  |  文档  ', '--limit', '20'], false, '腾讯文档'],
+  ['search 多关键词 JSON matched', ['search', '文档|表格', '--limit', '20', '--json'], false, 'matched'],
+  ['边界:search 仅|空词拒绝', ['search', '|'], true],
+  ['边界:web 仅|空词拒绝', ['web', '||'], true],
+);
+
+// web 多关键词（仅在有深拉缓存时跑，无缓存=全新环境自动跳过，不依赖网络）
+try {
+  const skillshCache = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data', 'web-cache', 'skillssh.json'), 'utf8'));
+  if (skillshCache.mode === 'deep' && Date.now() - skillshCache.fetchedAt < 6 * 3600 * 1000) {
+    cases.push(
+      ['web 多关键词|合并(缓存)', ['web', 'transcript|youtube', '--limit', '12'], false, 'youtube-transcript'],
+      ['web 多关键词命中标注(缓存)', ['web', 'transcript|youtube', '--limit', '12'], false, '命中: transcript | youtube'],
+    );
+  }
+} catch { /* 无 web 深拉缓存，跳过 web 多关键词用例 */ }
 cases.push(...edgeCases);
 
 // fetch --output-path 落盘冒烟（临时文件，跑完清理）

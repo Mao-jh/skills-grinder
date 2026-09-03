@@ -15,6 +15,7 @@ const os = require('os');
 const path = require('path');
 const { sanitize, truncate } = require('../lib/sanitize.js');
 const S = require('../lib/sources.js');
+const B = require('../lib/body-fetch.js');
 const { COVERAGE_GAPS } = require('../lib/coverage.js');
 
 const NODE = process.execPath;
@@ -376,6 +377,56 @@ const syncE2E = (async () => {
   try { if (fileExists) fs.unlinkSync(outFile); } catch { /* noop */ }
   check('契约:fetch --output-path 落盘', rOut.code === 0 && outOk && fileExists && fileMarked,
     `写入文件=${fileExists}，含隔离标记=${fileMarked}，截断=${outTrunc}`);
+
+  /* ---------- 回归 4: body-fetch（web 源正文抓取，v0.10.0） ---------- */
+  // 4.1 GitHub URL 解析（纯函数，无网络）
+  const giTree = B.githubInfo('https://github.com/michalparkola/tapestry-skills-for-claude-code/tree/main/youtube-transcript');
+  check('回归:body github tree 解析', giTree && giTree.kind === 'tree' && giTree.owner === 'michalparkola' && giTree.path === 'youtube-transcript' && giTree.ref === 'main',
+    `tree: ${giTree && giTree.owner}/${giTree && giTree.repo}/${giTree && giTree.ref}/${giTree && giTree.path}`);
+  const giBlob = B.githubInfo('https://github.com/a/b/blob/master/skills/x/SKILL.md');
+  check('回归:body github blob 解析', giBlob && giBlob.kind === 'blob' && giBlob.path === 'skills/x/SKILL.md', `blob path=${giBlob && giBlob.path}`);
+  const giRoot = B.githubInfo('https://github.com/openclaw/openclaw');
+  check('回归:body github 根解析', giRoot && giRoot.kind === 'root' && giRoot.ref === 'HEAD', `root kind=${giRoot && giRoot.kind}`);
+  const giSs = B.githubInfo('https://www.skills.sh/zeropointrepo/youtube-skills/transcript');
+  check('回归:body skills.sh 解析', giSs && giSs.kind === 'skillssh' && giSs.owner === 'zeropointrepo' && giSs.path === 'transcript',
+    `skills.sh: ${giSs && giSs.owner}/${giSs && giSs.repo}/${giSs && giSs.path}`);
+  check('回归:body 直读站不走 github 解析', B.githubInfo('https://claudskills.com/skills/x/SKILL.md') === null, 'claudskills 等直读站 URL 返回 null');
+
+  // 4.2 SKILL.md 提取（fixture 自包含，无网络）
+  const BODY_FIX = path.join(__dirname, 'fixtures', 'body');
+  const readBodyFix = (f) => fs.readFileSync(path.join(BODY_FIX, f), 'utf8');
+  const rawFix = readBodyFix('raw-skill.md');
+  check('回归:body 裸 markdown 判定', B.looksLikeSkillMd(rawFix) === true, 'frontmatter 开头判为 SKILL.md');
+  const extracted = B.extractSkillMd(readBodyFix('page-embedded.html'));
+  check('回归:body 页内围栏提取', extracted !== null && extracted.includes('name: fixture-skill') && extracted.includes('## How It Works'),
+    'HTML 页内围栏 SKILL.md 被提取');
+  check('回归:body 整页原始 markdown', (B.extractSkillMd(rawFix) || '').includes('## Purpose'), '整页原始 markdown 直接返回');
+  check('回归:body 无关页不误判', B.extractSkillMd('<html><body><p>hello</p></body></html>') === null, '无 SKILL.md 内容返回 null');
+
+  // 4.3 端到端（本地 http server 服务 fixture，验证 抓取→提取→清洗→UNTRUSTED 包装 全链路，不依赖外部网络）
+  const bodyE2E = (async () => {
+    const http = require('http');
+    const raw = readBodyFix('raw-skill.md');
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(raw);
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const port = server.address().port;
+    const url = `http://127.0.0.1:${port}/SKILL.md`;
+    try {
+      const r1 = await B.fetchBody(url, { force: true });
+      const got = !!r1 && r1.body.includes('## Purpose') && r1.via === 'page';
+      const r2 = await runCliAsync(['fetch-body', url, '--force']);
+      const cliOk = r2.ok && r2.out.includes('UNTRUSTED-DATA') && r2.out.includes('已被清洗')
+        && r2.out.includes('[链接已移除]') && r2.out.includes('[已擦除:邮箱]') && r2.out.includes('[已中和:忽略指令]');
+      return { ok: got && cliOk, detail: `fetchBody=${got ? 'OK' : 'FAIL'} / CLI 全链路=${cliOk ? 'OK' : 'FAIL'}` };
+    } finally {
+      server.close();
+    }
+  })();
+  const rBody = await bodyE2E;
+  check('回归:body 端到端', rBody.ok, rBody.detail);
 
   /* ---------- 4. 覆盖盲区提示（工具自省：让"该补哪些断言"可见，而非靠人肉回忆） ---------- */
   // 清单单一事实源：lib/coverage.js（sg report 输出同一份）。补了断言就把对应条目从清单里删除。

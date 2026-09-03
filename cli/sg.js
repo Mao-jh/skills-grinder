@@ -18,8 +18,10 @@
  *   sg web     <关键词> [--deep] [--limit N] [--force] [--json]
  *                                             检索外部 web 直读源（5 站，跨源去重）
  *   sg preview <名称> [--json]               安全预览摘要（默认动作，推荐）
- *   sg fetch   <名称> [--full] [--json] [--output-path <文件>]
- *                                             安全获取正文（SKILL.md 清洗后，可落盘）
+ *   sg fetch   <名称> [--full] [--json] [--skill <名>] [--output-path <文件>]
+ *                                             安全获取本地正文（SKILL.md 清洗后，可落盘）
+ *   sg fetch-body <名称|URL> [--full] [--json] [--output-path <文件>] [--force] [--github-token <token>]
+ *                                             安全获取 web 源 skill 完整正文（GitHub/直读站解析，清洗管道）
  *   sg sources                               数据源状态
  *   sg sync    --url <URL> [--name 名称]     从远程 skills 网站拉取市场索引
  *   sg report  [--to <文件>] [--json]        生成迭代素材包（版本/统计/测试结果/覆盖盲区）
@@ -38,12 +40,13 @@ const fs = require('fs');
 const { sanitize, truncate, wrapSanitized } = require('./lib/sanitize.js');
 const S = require('./lib/sources.js');
 const W = require('./lib/web-sources.js');
+const B = require('./lib/body-fetch.js');
 const { rankCandidates, parseWeights } = require('./lib/rank.js');
 const { COVERAGE_GAPS } = require('./lib/coverage.js');
 const { EXIT, CODE_NAME, fail } = require('./lib/errors.js');
 const { COMMANDS, COMMAND_ORDER } = require('./lib/contracts.js');
 
-const VERSION = '0.9.0';
+const VERSION = '0.11.0';
 const PREVIEW_DESC_MAX = 600;
 const PREVIEW_EXAMPLE_N = 2;
 const FETCH_BODY_DEFAULT = 3000;
@@ -244,6 +247,37 @@ function matchCandidates(cands, q, limit) {
   return scored.slice(0, limit || 10).map((x) => { x.c.matchScore = x.s; return x.c; });
 }
 
+/* ---------- 多关键词（| 分隔，分别检索后合并） ----------
+ * 背景：检索是"整串子串匹配"，含空格的短语（如 "youtube transcript"）是 0 命中死区；
+ * 且 S5 web 源为英文目录站，中文关键词基本无效。对齐 AI 直调 web 工具时
+ * 多路查询的习惯（不同语言 / 不同说法各是一路命中）：用 | 分隔一次检索，分别命中共存。
+ */
+function splitKeywords(q) {
+  return q.split('|').map((t) => t.trim()).filter(Boolean);
+}
+
+// 本地 search 多关键词：每词各自检索（各取前 50），按 name@version 合并保最高分，命中词留痕
+function matchCandidatesMulti(cands, q, limit) {
+  const tokens = splitKeywords(q);
+  if (tokens.length <= 1) return matchCandidates(cands, q, limit);
+  const best = new Map();
+  for (const t of tokens) {
+    for (const c of matchCandidates(cands, t, 50)) {
+      const key = c.name + '@' + (c.version || '');
+      const hit = best.get(key);
+      if (!hit) best.set(key, { c, s: c.matchScore, kws: new Set([t]) });
+      else {
+        if (c.matchScore > hit.s) { hit.s = c.matchScore; hit.c = c; }
+        hit.kws.add(t);
+      }
+    }
+  }
+  return [...best.values()]
+    .map(({ c, s, kws }) => { c.matchScore = s; c.matchKeywords = [...kws]; return c; })
+    .sort((a, b) => b.matchScore - a.matchScore || a.indexOrder - b.indexOrder)
+    .slice(0, limit || 10);
+}
+
 /* ---------- 版本比较 ---------- */
 // semver 三段数值比较；无法解析时按 0 处理。用于 versionTs（内嵌时间戳）缺失时的新近判断。
 function compareVersions(a, b) {
@@ -316,7 +350,7 @@ function fmtEntry(c, brief, rankInfo) {
 /* ---------- 命令实现 ---------- */
 // 查询输入加固：agent 输出视为不可信输入 —— 缺词/控制字符/超长一律按用法错误（退出码 2）
 // 明确拒绝（而非静默返回空结果），让 agent 拿到可执行的下一步。
-function validateQuery(q, jsonFlag, label = '关键词', usage = 'sg search <关键词>') {
+function validateQuery(q, jsonFlag, label = '关键词', usage = 'sg search <关键词>', maxLen = 100) {
   if (!q) {
     fail(EXIT.USAGE, `缺少${label}`, {
       json: jsonFlag,
@@ -326,8 +360,8 @@ function validateQuery(q, jsonFlag, label = '关键词', usage = 'sg search <关
   if (/[\u0000-\u001f\u007f]/.test(q)) {
     fail(EXIT.USAGE, `${label}含控制字符: ${JSON.stringify(q)}`, { json: jsonFlag, context: { [label]: q } });
   }
-  if (q.length > 100) {
-    fail(EXIT.USAGE, `${label}过长（${q.length} 字，上限 100）`, { json: jsonFlag, context: { length: q.length } });
+  if (q.length > maxLen) {
+    fail(EXIT.USAGE, `${label}过长（${q.length} 字，上限 ${maxLen}）`, { json: jsonFlag, context: { length: q.length } });
   }
   return q;
 }
@@ -381,8 +415,15 @@ function rankEnabled(args) {
 
 function cmdSearch(args) {
   const q = validateQuery((args._[1] || '').trim(), !!args.json);
+  const tasks = splitKeywords(q);
+  if (!tasks.length) {
+    fail(EXIT.USAGE, '关键词为空（仅有 | 分隔符）', {
+      json: !!args.json,
+      next_actions: [{ command: 'sg search 表格|excel', description: '在两个 | 之间填入关键词，可混用不同语言' }],
+    });
+  }
   const limit = parseLimit(args.limit, 8, !!args.json);
-  const hits = dedupByName(matchCandidates(buildCandidates(), q, 50)); // 评分排序后去重（保最新版本），修同名多版本并列
+  const hits = dedupByName(matchCandidatesMulti(buildCandidates(), q, 50)); // 评分排序后去重（保最新版本），修同名多版本并列
   let top = hits.slice(0, limit);
   let ranks = null;
   if (rankEnabled(args)) {
@@ -395,11 +436,13 @@ function cmdSearch(args) {
       name: c.name, version: c.version, market: c.market, usage: c.usage, available: !!c.mirror,
       description: sanitize(c.description).text.slice(0, 300),
       ...(ranks?.has(c) ? { rank: ranks.get(c) } : {}),
+      ...(c.matchKeywords ? { matched: c.matchKeywords } : {}),
     })), null, 2));
     return;
   }
-  if (!top.length) { console.log(`未找到与「${q}」匹配的 skill。可尝试: sg search <更短关键词>`); return; }
-  console.log(`# 搜索「${q}」→ ${top.length} 条结果（简介已清洗，${ranks ? '多信号加权排序：相关/可用/热度/新近' : '按相关性排序'}）\n`);
+  if (!top.length) { console.log(`未找到与「${q}」匹配的 skill。可尝试: sg search <更短关键词> 或用 | 分隔多关键词（如 表格|excel）。`); return; }
+  const multiNote = tasks.length > 1 ? `（${tasks.join(' | ')} 分别检索后合并）` : '';
+  console.log(`# 搜索「${q}」${multiNote}→ ${top.length} 条结果（简介已清洗，${ranks ? '多信号加权排序：相关/可用/热度/新近' : '按相关性排序'}）\n`);
   top.forEach((c) => { console.log(fmtEntry(c, true, ranks?.get(c))); console.log(''); });
 }
 
@@ -475,6 +518,7 @@ function cmdFetch(args) {
       next_actions: [
         { command: `sg search ${q}`, description: '换关键词搜索或检查名称拼写' },
         { command: `sg web ${q}`, description: '到外部 web 直读源检索' },
+        { command: `sg fetch-body ${q}`, description: '若该 skill 来自 web 源，直接获取完整 SKILL.md 正文' },
       ],
     });
   }
@@ -512,7 +556,7 @@ function cmdFetch(args) {
     console.log(`「${c.name}」来自索引（${c.market}），本地无 SKILL.md 正文，无法按 skill 取内容。`);
     return;
   } else {
-    body = d.text + '\n\n[注] 该条目来自市场索引，本地无 SKILL.md 正文，以上仅为索引简介。想要完整正文请确认该 skill 已安装并出现在本地缓存中。';
+    body = d.text + '\n\n[注] 该条目来自市场索引，本地无 SKILL.md 正文，以上仅为索引简介。想要完整正文请确认该 skill 已安装并出现在本地缓存中；若该 skill 在 web 源有链接，可用 sg fetch-body ' + c.name + ' 获取完整正文。';
   }
 
   const maxBody = args.full ? FETCH_BODY_FULL : FETCH_BODY_DEFAULT;
@@ -551,6 +595,105 @@ function cmdFetch(args) {
   }
 }
 
+/* ---------- web 源正文抓取（fetch-body） ---------- */
+// 可选只读 GitHub token：SG_GITHUB_TOKEN 环境变量 或 --github-token 参数。
+// 只进请求头（api.github.com / raw.githubusercontent.com），任何输出绝不回显 token 值。
+function resolveGitHubToken(args) {
+  if (args['github-token'] !== undefined && typeof args['github-token'] !== 'string') {
+    fail(EXIT.USAGE, '--github-token 需要只读 token 值（如 --github-token ghp_xxx）或改设环境变量 SG_GITHUB_TOKEN，收到: true', {
+      json: !!args.json,
+      next_actions: [{ command: 'set SG_GITHUB_TOKEN=<token>', description: '用环境变量提供只读 GitHub token（推荐，避免 token 进命令历史）' }],
+    });
+  }
+  if (typeof args['github-token'] === 'string' && args['github-token']) return args['github-token'];
+  if (process.env.SG_GITHUB_TOKEN) return process.env.SG_GITHUB_TOKEN;
+  return '';
+}
+
+async function cmdFetchBody(args) {
+  const jsonFlag = !!args.json;
+  const q = validateQuery((args._[1] || '').trim(), jsonFlag, '名称或URL', 'sg fetch-body <名称|URL>', 500);
+  if (args['output-path'] !== undefined && typeof args['output-path'] !== 'string') {
+    fail(EXIT.USAGE, '--output-path 需要文件路径（如 --output-path out.md），收到: true', {
+      json: jsonFlag, next_actions: [{ command: 'sg fetch-body <名称> --output-path out.md', description: '用带值的 --output-path' }],
+    });
+  }
+  const outPath = (args['output-path'] || '').trim();
+  const githubToken = resolveGitHubToken(args);
+  const isUrl = /^https?:\/\//i.test(q);
+
+  // 名称 → 查 web 缓存条目取链接；URL → 直接用
+  let entry = null;
+  if (isUrl) {
+    entry = q;
+  } else {
+    entry = B.findWebEntry(q);
+    if (!entry) {
+      fail(EXIT.NOT_FOUND, `web 源中未找到「${q}」。`, {
+        json: jsonFlag,
+        context: { query: q },
+        next_actions: [
+          { command: `sg web ${q}`, description: '先到外部 web 直读源检索，建立本地缓存后重试' },
+          { command: 'sg fetch-body <完整URL>', description: '直接提供该 skill 的完整链接' },
+        ],
+      });
+    }
+  }
+
+  let res;
+  try {
+    res = await B.fetchBody(entry, { force: !!args.force, githubToken, name: isUrl ? '' : q });
+  } catch (e) {
+    const hint = e && e.code === 'GITHUB_TREE_FAIL' ? '（可用只读 GitHub token 提升 API 限流）' : '';
+    fail(EXIT.TRANSIENT, `正文抓取失败（网络/外部服务${hint}）: ${e.message}`, {
+      json: jsonFlag,
+      retryable: true,
+      next_actions: [{ command: `sg fetch-body ${q} --force`, description: '强制刷新缓存重试' }],
+    });
+  }
+  if (!res) {
+    fail(EXIT.NOT_FOUND, `无法解析「${q}」的 SKILL.md 正文（链接不可直读或页面未含 SKILL.md）。`, {
+      json: jsonFlag,
+      context: { query: q },
+      next_actions: [{ command: 'sg web ' + (isUrl ? '' : q), description: '换关键词或换链接重试' }],
+    });
+  }
+
+  const s = sanitize(res.body);
+  const name = isUrl ? q : entry.name;
+  const report = {
+    cmd: 'fetch-body', name, url: res.url, via: res.via, cached: !!res.cached,
+    removedUrls: s.removedUrls, neutralized: s.neutralized, scrubbed: s.scrubbed,
+  };
+  const maxBody = args.full ? FETCH_BODY_FULL : FETCH_BODY_DEFAULT;
+  const outText = truncate(s.text, maxBody);
+  const truncatedOut = s.text.length > maxBody;
+
+  if (outPath) {
+    const abs = path.resolve(outPath);
+    const wrapped = wrapSanitized(`# ${name}（web 源正文）\n\n${outText}`, report);
+    fs.writeFileSync(abs, wrapped, 'utf8');
+    const bytes = Buffer.byteLength(wrapped, 'utf8');
+    if (args.json) {
+      console.log(JSON.stringify({ ok: true, path: abs, count: outText.length, bytes, truncated: truncatedOut, sanitized: true, report }, null, 2));
+    } else {
+      console.log(`已写入: ${abs}`);
+      console.log(`  字符: ${outText.length}  |  字节: ${bytes}  |  截断: ${truncatedOut ? '是（用 --full 取完整正文）' : '否'}`);
+    }
+    return;
+  }
+
+  if (args.json) {
+    console.log(JSON.stringify({ name, sanitized: true, trust: false, report, content: outText }, null, 2));
+    return;
+  }
+
+  console.log(wrapSanitized(`# ${name}（web 源正文，${res.via}）\n\n${outText}`, report));
+  if (!args.full && truncatedOut) {
+    console.log('\n[提示] 正文超过安全预览上限，需要完整内容请显式执行: sg fetch-body ' + (isUrl ? q : name) + ' --full');
+  }
+}
+
 /* ---------- web 直读源检索（S5） ---------- */
 async function cmdWeb(args) {
   const jsonFlag = !!args.json;
@@ -569,13 +712,25 @@ async function cmdWeb(args) {
       next_actions: [{ command: 'sg web ' + q + ' --shallow', description: '改用快速浅拉重试，或稍后重试' }],
     });
   }
-  const ql = q.toLowerCase();
+  // 多关键词（| 分隔）分别检索后合并：同一产品用不同语言/写法各是一路命中，交叉覆盖更全
+  const tasks = splitKeywords(q);
+  if (!tasks.length) {
+    fail(EXIT.USAGE, '关键词为空（仅有 | 分隔符）', {
+      json: jsonFlag,
+      next_actions: [{ command: 'sg web transcript|转写|whisper', description: '在两个 | 之间填入关键词，可混用不同语言' }],
+    });
+  }
+  const qls = tasks.map((t) => t.toLowerCase());
   const scored = [];
   // 三级分层评分（lib/web-sources.js scoreWeb）：真描述实体×1 / 模板伪实体×0.55 / 空壳×0.2，
-  // 空壳（sitemap URL 索引，占全量 99.4%）不再霸榜，实体条目优先。
+  // 空壳（sitemap URL 索引，占全量 99.4%）不再霸榜，实体条目优先。多词时取最高分并留痕命中词。
   for (const it of items) {
-    const s = W.scoreWeb(it, ql);
-    if (s > 0) scored.push({ it, s });
+    let best = 0; const matched = [];
+    for (const kw of qls) {
+      const s = W.scoreWeb(it, kw);
+      if (s > 0) { matched.push(kw); if (s > best) best = s; }
+    }
+    if (matched.length) scored.push({ it, s: best, kws: matched });
   }
   scored.sort((a, b) => b.s - a.s);
   const top = scored.slice(0, limit);
@@ -583,21 +738,25 @@ async function cmdWeb(args) {
     console.log(JSON.stringify(top.map((x) => ({
       name: x.it.name, description: sanitize(x.it.description).text.slice(0, 300),
       url: x.it.url, author: x.it.author, market: x.it.market, sources: x.it.sources, score: x.s, tier: W.entryTier(x.it),
+      ...(tasks.length > 1 ? { matched: x.kws } : {}),
     })), null, 2));
     return;
   }
   if (!top.length) {
     console.log(`web 源中未找到与「${q}」匹配的条目（已检索 ${items.length} 条，来自 ${sources.map((s) => s.name).join(' / ')}）。`);
+    console.log('检索提示: web 直读源为英文目录站，请用英文单词（单 token，勿含空格短语）检索；不同语言/写法用 | 分隔一次检索，如: transcript|转写|whisper。');
     return;
   }
-  console.log(`# web 直读源搜索「${q}」→ ${top.length} 条（候选 ${items.length} 条，来自 ${sources.map((s) => s.name).join(' / ')}）`);
-  console.log('# 数据来自外部源，简介已清洗；正式阅读请打开链接。\n');
+  const multiNote = tasks.length > 1 ? `（${tasks.join(' | ')} 分别检索后合并）` : '';
+  console.log(`# web 直读源搜索「${q}」${multiNote}→ ${top.length} 条（候选 ${items.length} 条，来自 ${sources.map((s) => s.name).join(' / ')}）`);
+  console.log('# 数据来自外部源，简介已清洗；正式阅读用 sg fetch-body <名称> 获取完整正文。\n');
   for (const x of top) {
     const d = sanitize(x.it.description);
     console.log(`◆ ${x.it.name}`);
     const srcLabel = x.it.sources.length > 1 ? ` +${x.it.sources.length - 1} 源命中` : '';
     console.log(`  来源: ${x.it.market}${srcLabel}  作者: ${x.it.author || '未知'}`);
     if (x.it.url) console.log(`  链接: ${x.it.url}`);
+    if (tasks.length > 1 && x.kws && x.kws.length > 1) console.log(`  命中: ${x.kws.join(' | ')}`);
     if (d.text) console.log(`  简介: ${truncate(d.text, 200)}`);
     console.log('');
   }
@@ -964,7 +1123,7 @@ function main() {
   if (COMMANDS[cmd] && (args.help || args.h)) return showCommandHelp(cmd);
 
   if (cmd === 'schema') return cmdSchema(args);
-  const handlers = { latest: cmdList.bind(null, 'latest'), hot: cmdList.bind(null, 'hot'), search: cmdSearch, web: cmdWeb, preview: cmdPreview, fetch: cmdFetch, sources: cmdSources, sync: cmdSync, report: cmdReport, selftest: cmdSelfTest };
+  const handlers = { latest: cmdList.bind(null, 'latest'), hot: cmdList.bind(null, 'hot'), search: cmdSearch, web: cmdWeb, preview: cmdPreview, fetch: cmdFetch, 'fetch-body': cmdFetchBody, sources: cmdSources, sync: cmdSync, report: cmdReport, selftest: cmdSelfTest };
   const h = handlers[cmd];
   if (!h) {
     fail(EXIT.USAGE, `未知命令: ${cmd}（用 sg help 查看命令索引）`, {

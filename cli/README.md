@@ -2,7 +2,7 @@
 
 AI 第一用户的 skills 市场检索工具。遇到难解问题时，搜索外部 skills 获取「思路」与「方法」——这些内容藏在他人 SKILL.md 中，联网搜索学不到。
 
-**当前版本: 0.9.0**（单一事实源 = `sg.js` 的 `VERSION` 常量；README 声明必须与其一致，门禁强制校验）
+**当前版本: 0.11.0**（单一事实源 = `sg.js` 的 `VERSION` 常量；README 声明必须与其一致，门禁强制校验）
 
 **核心安全设计：所有外部内容在进入 AI 上下文前必过清洗管道**（URL 抹除 / 注入中和 / 敏感擦除），并包裹 `UNTRUSTED-DATA` 隔离标记，声明为数据而非指令。详见 [SECURITY.md](SECURITY.md)。
 
@@ -20,6 +20,8 @@ node sg.js search 文档 --rank mixed    # 多信号加权排行（--rank mixed 
 node sg.js search 文档 --rank mixed --weights match=0.4,avail=0.4,usage=0.1,recency=0.1  # 自定义权重
 node sg.js latest --rank mixed      # 榜单也支持加权（hot 默认热度 0.8+新近 0.2；latest 反之）
 node sg.js web deep-research        # 检索外部 web 直读源（5 站，跨源去重+三级分层，默认全量拉取，缓存 6h）
+node sg.js web 'transcript|转写|whisper'  # | 分隔多关键词：各词分别检索后合并（多语言/多写法一次命中；web 源为英文目录站，建议英文单词）
+node sg.js search '表格|excel'     # search 同样支持 | 分隔多关键词分别检索后合并
 node sg.js web 表格 --shallow       # --shallow 快速浅拉（首屏少量条目，适合快速尝鲜）
 node sg.js web 表格 --force         # 强制刷新缓存
 node sg.js preview sheetagent       # 安全预览（推荐）
@@ -27,6 +29,8 @@ node sg.js fetch sheetagent         # 获取正文（清洗后，默认截断）
 node sg.js fetch sheetagent --skill excel-handler   # 只取插件内指定 skill 的正文
 node sg.js fetch sheetagent --full  # 完整正文（插件全部 skills）
 node sg.js fetch sheetagent --output-path out.md    # 大正文落盘，返回路径+摘要（不内联）
+node sg.js fetch-body youtube-transcript   # 获取 web 源 skill 的完整 SKILL.md 正文（GitHub/直读站解析，复用清洗管道）
+node sg.js fetch-body <URL> --full  # 直接给链接取正文；--force 跳过正文缓存
 node sg.js sources                  # 数据源状态
 node sg.js sync --url <URL>         # 爬取远程 skills 网站（marketplace.json；node 原生拉取优先，curl/powershell 回退）
 node sg.js schema [命令]            # 机器可读命令契约（内省；--text 人类可读）
@@ -34,7 +38,22 @@ node sg.js report                   # 生成迭代素材包（版本/数据源�
 node sg.js selftest                 # 安全层自检
 ```
 
-## 命令契约（v0.9.0，对齐 agent-first CLI 最佳实践）
+## 多关键词检索（v0.11.0）
+
+检索是「整串子串匹配」：含空格的短语（如 `youtube transcript`）会静默 0 命中；S5 web 源为英文目录站，中文关键词基本无效。**用** **`|`** **分隔多个关键词，各词分别检索后合并**，一次拿到多语言/多写法的交叉命中（对齐 AI 直调 web 工具时多路查询的习惯）：
+
+```bash
+sg web 'transcript|转写|whisper'   # 中英混合，各词独立检索后合并去重
+sg search '表格|excel' --limit 6   # 本地源同样支持
+```
+
+- 同一产品被多词命中时只保留最高分，并标注「命中: 词A | 词B」（人类输出）或 `matched` 字段（`--json`）。
+
+- 用词建议：以英文单 token 为主（web 源名称/简介几乎全英文）；不同语言/不同说法用 `|` 并列，一次检索即可覆盖。
+
+- 空关键词（如单独的 `|`）按用法错误拒绝（退出码 2）。
+
+## 命令契约（v0.11.0，对齐 agent-first CLI 最佳实践）
 
 CLI 面向 AI 第一用户，命令本身即"模型与环境之间的可验证协议"。核心约定：
 
@@ -97,6 +116,24 @@ CLI 面向 AI 第一用户，命令本身即"模型与环境之间的可验证�
 - **清洗**：命中条目的简介输出前过 sanitize 管道（URL 抹除/注入中和/敏感擦除），链接为结构化字段单独展示。
 
 - 大数组合流使用循环 push（曾因 `push(...items)` spread 20 万条爆调用栈，已修复并有回归断言）。
+
+## web 源正文抓取（fetch-body，v0.10.0）
+
+`sg web` 只给条目级数据（名称+简介+链接）；`sg fetch-body` 把命中条目的链接解析为**完整 SKILL.md 正文**（复用同一清洗管道），补齐"方法级"内容（工作流/判别表/铁律）。标准流程扩为：`sg web <关键词>` → `sg fetch-body <名称>`。
+
+- **输入**：web 源 skill 名称（自动查 web 缓存取链接）或完整 URL（`--full` 放行 12000 字，默认截断 3000；`--output-path` 落盘返回路径；`--force` 跳过正文缓存）。
+
+- **三落点解析（不止 GitHub，实测定稿）**：
+
+  1. **GitHub**：tree / blob / raw / 仓库根 / skills.sh 派生 URL 解析为 raw 路径直取；仓库根用 GitHub API 树发现 SKILL.md。普通网络直接命中。
+  2. **直读站页面**：claudskills.com / skillmd.ai / nanoskill.ai 等直接托管 `<slug>/SKILL.md` 的站点——裸 markdown 整页提取，或页内围栏代码块提取。
+  3. **按名兜底**：条目链接既非 GitHub 也非直读站（如 skills.rest/skills.sh 渲染页）时，按名称在已知直读站再试一遍。GitHub 不可达的网络（本机实测 github.com/raw/api 全 000）仍能拿到正文。
+
+- **可选只读 GitHub token（低风险换深度学习能力）**：`SG_GITHUB_TOKEN` 环境变量或 `--github-token` 参数。只用于 GitHub API 树发现，限流 60 次/时 → 5000 次/时；token **只进请求头、绝不回显**（不出 stdout/stderr/错误信息）。零配置匿名照常可用，token 纯属可选增强。
+
+- **正文缓存**：落 `cli/data/body-cache/<sha1(URL)>.json`，TTL 24h（正文比索引稳定，比 6h 索引缓存更长）。
+
+- **安全**：抓到的正文与其它外部内容同走 sanitize 管道 + UNTRUSTED 隔离包装（实测单篇可抹除十几个 URL）。
 
 ## 搜索行为
 
@@ -186,6 +223,7 @@ cli/
 │   ├── sanitize.js    # 安全清洗层（URL/注入/敏感 + 隔离包装）
 │   ├── sources.js     # 数据源发现（S1-S4）+ 热度/新近信号
 │   ├── web-sources.js # S5 web 直读源（5 源适配器 + 缓存 + 跨源去重）
+│   ├── body-fetch.js  # web 源 SKILL.md 正文抓取（GitHub/直读站解析 + 正文缓存 + 可选只读 token）
 │   ├── rank.js        # 多信号加权排行（归一化 + 权重融合 + clamp）
 │   ├── errors.js      # 统一错误契约（退出码映射 + 结构化错误封套）
 │   ├── contracts.js   # 命令契约单一事实源（帮助 --help 与 sg schema 共用）
@@ -196,8 +234,10 @@ cli/
 │   ├── release-check.js          # 迭代质量门禁（一票否决）
 │   ├── fixture-remote-market.json  # 远程源测试样本（含恶意内容）
 │   └── fixtures/web/             # S5 web 源解析器 fixture（自包含，不依赖网络）
+│       └── fixtures/body/        # fetch-body 提取器 fixture（裸 markdown / 页内围栏）
 └── data/
     ├── synced/       # sg sync 产物
     └── web-cache/    # sg web 缓存（浅拉/深拉分开，TTL 6h）
+        └── body-cache/  # sg fetch-body 正文缓存（TTL 24h）
 ```
 
